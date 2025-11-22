@@ -8,7 +8,7 @@
 // </auto-generated>
 //------------------------------------------------------------------------------
 
-namespace Wired_Transfer_eXpedite_Quick_Remote_Quest.Properties {
+namespace adfs.Properties {
     using System;
     
     
@@ -39,7 +39,7 @@ namespace Wired_Transfer_eXpedite_Quick_Remote_Quest.Properties {
         internal static global::System.Resources.ResourceManager ResourceManager {
             get {
                 if (object.ReferenceEquals(resourceMan, null)) {
-                    global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("Wired_Transfer_eXpedite_Quick_Remote_Quest.Properties.Resources", typeof(Resources).Assembly);
+                    global::System.Resources.ResourceManager temp = new global::System.Resources.ResourceManager("adfs.Properties.Resources", typeof(Resources).Assembly);
                     resourceMan = temp;
                 }
                 return resourceMan;

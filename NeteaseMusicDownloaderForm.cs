@@ -26,6 +26,7 @@ namespace AdbFileUploader
         private int _currentPage = 1;
         private int _totalPages = 1;
         private int _pageSize = 20;
+        private Button _btnAddAll;
         // SongInfo类用于存储歌曲信息
         private class SongInfo
         {
@@ -132,7 +133,7 @@ namespace AdbFileUploader
         }
         public NeteaseMusicDownloaderForm()
         {
-            InitializeUI();
+            //InitializeUI();
             _httpClient = new HttpClient();
             _httpClient.Timeout = TimeSpan.FromSeconds(30);
             _httpClient.DefaultRequestHeaders.Add("Origin", "https://wyapi.toubiec.cn");
@@ -448,10 +449,11 @@ namespace AdbFileUploader
             {
                 Dock = DockStyle.Fill,
                 Padding = new Padding(5),
-                RowCount = 1,
+                RowCount = 2,
                 ColumnCount = 1
             };
-
+            searchResultsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 90F));
+            searchResultsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40F));
             ListView lvSearchResults = new ListView
             {
                 Name = "lvSearchResults",
@@ -468,6 +470,16 @@ namespace AdbFileUploader
             lvSearchResults.DoubleClick += async (s, e) => await AddSelectedSearchResultsToDownloadListAsync();
 
             searchResultsLayout.Controls.Add(lvSearchResults, 0, 0);
+            _btnAddAll = new Button
+            {
+                Text = "添加全部",
+                Dock = DockStyle.Right,
+                Margin = new Padding(5, 5, 5, 5),
+                Visible = false, // 初始隐藏
+                Enabled = false
+            };
+            _btnAddAll.Click += async (s, e) => await AddAllSearchResultsToDownloadListAsync();
+            searchResultsLayout.Controls.Add(_btnAddAll, 0, 1);
             grpSearchResults.Controls.Add(searchResultsLayout);
             mainLayout.Controls.Add(grpSearchResults, 0, 1);
 
@@ -585,6 +597,105 @@ namespace AdbFileUploader
             this.Controls.Add(mainLayout);
         }
 
+        private async Task AddAllSearchResultsToDownloadListAsync()
+        {
+            var lstSongs = this.Controls.Find("lstSongs", true).FirstOrDefault() as ListBox;
+            var cboQuality = this.Controls.Find("cboQuality", true).FirstOrDefault() as ComboBox;
+            var txtInfo = this.Controls.Find("txtInfo", true).FirstOrDefault() as TextBox;
+            var lblStatus = this.Controls.Find("lblStatus", true).FirstOrDefault() as Label;
+            var progressBar = this.Controls.Find("progressBar", true).FirstOrDefault() as ProgressBar;
+
+            if (_searchResults.Count == 0)
+            {
+                MessageBox.Show("没有可添加的歌曲", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                lblStatus.Text = "正在获取全部歌曲信息...";
+                progressBar.Visible = true;
+                progressBar.Value = 10;
+                _btnAddAll.Enabled = false;
+
+                List<SongInfo> songsToAdd = new List<SongInfo>();
+
+                for (int i = 0; i < _searchResults.Count; i++)
+                {
+                    var song = _searchResults[i];
+                    progressBar.Value = 20 + (int)((double)i / _searchResults.Count * 60);
+
+                    // 获取详细信息
+                    var songDetail = await GetSongDetailAsync(song.Id);
+                    if (songDetail != null)
+                    {
+                        song.Album = songDetail["album"].ToString();
+                        song.PicUrl = songDetail["picimg"].ToString();
+                        // 尝试获取时长
+                        if (songDetail["duration"] != null)
+                        {
+                            long duration;
+                            if (long.TryParse(songDetail["duration"].ToString(), out duration))
+                            {
+                                song.Duration = duration;
+                            }
+                        }
+                    }
+
+                    // 获取下载URL
+                    string quality = GetQualityValue(cboQuality.SelectedIndex);
+                    var urlData = await GetSongUrlAsync(song.Id, quality);
+                    if (urlData != null && !string.IsNullOrEmpty(urlData["url"].ToString()))
+                    {
+                        song.Url = urlData["url"].ToString();
+                        song.Quality = urlData["level"].ToString();
+                        song.Size = $"{urlData["size"].Value<long>() / 1024 / 1024:F1} MB";
+                    }
+                    songsToAdd.Add(song);
+
+                    // 更新状态
+                    lblStatus.Text = $"正在获取 {i + 1}/{_searchResults.Count} 首歌曲信息...";
+                    Application.DoEvents();
+                }
+
+                // 添加到下载列表
+                foreach (var song in songsToAdd)
+                {
+                    _currentSongs.Add(song);
+                    string songInfo = $"{song.Artists} - {song.Name} ({song.Album})";
+                    if (!string.IsNullOrEmpty(song.Quality))
+                    {
+                        songInfo += $" [{song.Quality}]";
+                    }
+                    lstSongs.Items.Add(songInfo);
+                }
+
+                // 显示最后添加的歌曲信息
+                if (songsToAdd.Count > 0)
+                {
+                    var lastSong = songsToAdd.Last();
+                    txtInfo.Text = $"歌曲: {lastSong.Name}\n" +
+                                   $"艺术家: {lastSong.Artists}\n" +
+                                   $"专辑: {lastSong.Album}\n" +
+                                   $"时长: {TimeSpan.FromMilliseconds(lastSong.Duration).ToString(@"mm\:ss")}\n" +
+                                   (!string.IsNullOrEmpty(lastSong.Quality) ? $"音质: {lastSong.Quality}\n大小: {lastSong.Size}" : "音质: 不可用");
+                }
+
+                lblStatus.Text = $"已添加 {songsToAdd.Count} 首歌曲到下载列表";
+                progressBar.Value = 100;
+                _btnAddAll.Visible = false; // 添加完成后隐藏按钮
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = "添加失败";
+                MessageBox.Show($"添加歌曲失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                progressBar.Visible = false;
+                _btnAddAll.Enabled = true;
+            }
+        }
         private void TxtUrl_GotFocus(object sender, EventArgs e)
         {
             TextBox tb = (TextBox)sender;
@@ -722,11 +833,21 @@ namespace AdbFileUploader
                 btnNextPage.Enabled = _currentPage < _totalPages;
                 lblStatus.Text = $"找到 {result.Result.SongCount} 首歌曲";
                 progressBar.Value = 100;
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = false;
+                    _btnAddAll.Enabled = false;
+                }
             }
             catch (Exception ex)
             {
                 lblStatus.Text = "搜索失败";
                 MessageBox.Show($"搜索失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = false;
+                    _btnAddAll.Enabled = false;
+                }
             }
             finally
             {
@@ -822,7 +943,6 @@ namespace AdbFileUploader
                         {
                             song.Album = songDetail["album"].ToString();
                             song.PicUrl = songDetail["picimg"].ToString();
-                            //song.Duration = songDetail["duration"].Value<long>();
                         }
                         // 获取下载URL
                         string quality = GetQualityValue(cboQuality.SelectedIndex);
@@ -1033,15 +1153,27 @@ namespace AdbFileUploader
                 // 清空输入框，准备下一次输入
                 txtPlaylistId.Text = "请输入歌单链接";
                 txtPlaylistId.ForeColor = Color.Gray;
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = true;
+                    _btnAddAll.Enabled = true;
+                }
+
             }
             catch (Exception ex)
             {
                 lblStatus.Text = "解析失败";
                 MessageBox.Show($"解析歌单失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = true;
+                    _btnAddAll.Enabled = true;
+                }
             }
             finally
             {
                 progressBar.Visible = false;
+                
             }
         }
 
@@ -1116,15 +1248,26 @@ namespace AdbFileUploader
                 // 清空输入框，准备下一次输入
                 txtAlbumId.Text = "请输入专辑链接";
                 txtAlbumId.ForeColor = Color.Gray;
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = true;
+                    _btnAddAll.Enabled = true;
+                }
             }
             catch (Exception ex)
             {
                 lblStatus.Text = "解析失败";
                 MessageBox.Show($"解析专辑失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                if (_btnAddAll != null)
+                {
+                    _btnAddAll.Visible = true;
+                    _btnAddAll.Enabled = true;
+                }
             }
             finally
             {
                 progressBar.Visible = false;
+                
             }
         }
         public string ExtractAlbumId(string albumUrl)
@@ -1320,7 +1463,7 @@ namespace AdbFileUploader
                     "application/json"
                 );
 
-                var response = await _httpClient.PostAsync("https://wyapi-2.toubiec.cn/api/getPlaylistDetail", content);
+                var response = await _httpClient.PostAsync("https://wyapi-2.toubiec.cn/api/music/playlist", content);
                 if (response.IsSuccessStatusCode)
                 {
                     var responseContent = await response.Content.ReadAsStringAsync();
@@ -1347,7 +1490,7 @@ namespace AdbFileUploader
                     "application/json"
                 );
 
-                var response = await _httpClient.PostAsync("https://wyapi-2.toubiec.cn/api/getAlbumDetail", content);
+                var response = await _httpClient.PostAsync("https://wyapi-2.toubiec.cn/api/music/album", content);
                 if (response.IsSuccessStatusCode)
                 {
                     var responseContent = await response.Content.ReadAsStringAsync();

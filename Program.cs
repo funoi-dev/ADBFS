@@ -1,16 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 namespace AdbFileUploader
 {
     public partial class MainForm : Form
     {
-
-        private string _selectedFilePath = string.Empty;
         private string _adbPath;
         private List<string> _uploadFiles = new List<string>();
         private ListBox lstUploadFiles;
@@ -19,6 +20,8 @@ namespace AdbFileUploader
         private Button btnRemoveFile;
         private Label label5;
         private Label lblFileCount;
+        private List<PluginConfig> _plugins = new List<PluginConfig>();
+        private const string IniSection = "Plugin";
         // 安卓常用媒体目录（标准系统路径）
         private readonly string[] _commonTargetPaths = new[]
         {
@@ -31,18 +34,261 @@ namespace AdbFileUploader
             "/sdcard/Recordings/",      // 录音目录
             "/sdcard/"                  // 根目录（默认）
         };
+        public class PluginConfig
+        {
+            // 文件夹名称（可选，用于标识来源）
+            public string FolderName { get; set; }
+            // 配置参数
+            public string Name { get; set; }
+            public string DisplayName { get; set; }
+            public string ExePath { get; set; }
+            public string CommandLine { get; set; }
+        }
+        public static class IniHelper
+        {
+            // 引入Windows API（读取ini文件）
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+            private static extern int GetPrivateProfileString(
+                string lpAppName,       // 节名（ini文件中的[节名]）
+                string lpKeyName,       // 键名
+                string lpDefault,       // 默认值（键不存在时返回）
+                StringBuilder lpReturnedString,  // 接收结果的缓冲区
+                int nSize,              // 缓冲区大小
+                string lpFileName       // ini文件路径
+            );
 
+            /// <summary>
+            /// 读取ini文件中指定节和键的值
+            /// </summary>
+            /// <param name="filePath">ini文件路径</param>
+            /// <param name="section">节名（如[Plugin]）</param>
+            /// <param name="key">键名（如name）</param>
+            /// <returns>键对应的值（不存在则返回空）</returns>
+            public static string ReadValue(string filePath, string section, string key)
+            {
+                if (!System.IO.File.Exists(filePath))
+                    return string.Empty;
+
+                // 定义缓冲区（避免值过长被截断，可根据需求调整大小）
+                StringBuilder buffer = new StringBuilder(2048);
+                // 调用API读取值
+                GetPrivateProfileString(section, key, "", buffer, buffer.Capacity, filePath);
+                return buffer.ToString();
+            }
+        }
         public MainForm()
         {
-
+            AutoScaleMode = AutoScaleMode.Dpi;
             InitializeComponent();
             InitializeAdbPath();
+            InitializePlugins();
             CheckForConnectedDevices();
             UpdateFileList();
             this.Icon = new Icon("icon.ico");
             // 初始化提示说明默认文本
             txtTips.Text = "传输文件前，请先按照下列步骤开启ADB调试：\r\n1. 打开青鹿-头像-联系我们，长按电话号码，选择拨打电话。\r\n2. 输入*#*#83781#*#*\r\n在上方菜单中的第一项 TELEPHONY 中下滑找到 USB接口激活，打开\r\n在第二项DEBUG&LOG中找到USB Debug，打开\r\n3. 使用数据线连接电脑，打开本程序，平板应该会提示：是否使用本台计算机调试，勾选一律使用，点确定\r\n4. 重启软件，Having fun \r\n 彩蛋：这个提示可以删除";
         }
+        //插件
+        private void InitializePlugins()
+        {
+            try
+            {
+                string appDirectory = Application.StartupPath;
+                string PluginsPath = Path.Combine(appDirectory, "plugins");
+                if (!Directory.Exists(PluginsPath))
+                {
+                    return;
+                }
+                string[] AllSubfolers = Directory.GetDirectories(PluginsPath, "*", SearchOption.AllDirectories);
+                foreach (string h in AllSubfolers)
+                {
+                    string cfgPath = Path.Combine(h, "config.wtx");
+                    if (!File.Exists(cfgPath)) continue;
+                    PluginConfig config = new PluginConfig
+                    {
+                        FolderName = Path.GetDirectoryName(cfgPath),
+                        Name = IniHelper.ReadValue(cfgPath, IniSection, "name"),
+                        DisplayName = IniHelper.ReadValue(cfgPath, IniSection, "displayname"),
+                        ExePath = IniHelper.ReadValue(cfgPath, IniSection, "exepath"),
+                        CommandLine = IniHelper.ReadValue(cfgPath, IniSection, "commandline")
+                    };
+                    _plugins.Add(config);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"读取配置出错：{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            // 初始化插件菜单
+            InitializePluginMenus();
+        }
+        private void InitializePluginMenus()
+        {
+
+            // 查找或创建「插件」顶级菜单项（避免重复添加）
+            ToolStripMenuItem pluginTopMenu = menuStrip.Items
+                .OfType<ToolStripMenuItem>()
+                .FirstOrDefault(item => item.Text == "插件");
+
+            // 若不存在，则创建「插件」顶级菜单项并添加到menuStrip
+            if (pluginTopMenu == null)
+            {
+                pluginTopMenu = new ToolStripMenuItem("插件")
+                {
+                    Name = "pluginTopMenu",
+                    Size = new System.Drawing.Size(56, 21)
+                };
+                menuStrip.Items.Insert(menuStrip.Items.Count - 1, pluginTopMenu);
+            }
+
+            // 3. 清空「插件」菜单的现有子项（避免重复添加）
+            pluginTopMenu.DropDownItems.Clear();
+
+            // 4. 无插件时显示禁用提示
+            if (_plugins == null || _plugins.Count == 0)
+            {
+                ToolStripMenuItem noPluginItem = new ToolStripMenuItem("无可用插件")
+                {
+                    Enabled = false, // 禁用，防止点击
+                    Size = new System.Drawing.Size(152, 22) // 统一子项尺寸
+                };
+                pluginTopMenu.DropDownItems.Add(noPluginItem);
+                return;
+            }
+            foreach (var plugin in _plugins)
+            {
+                string menuText = string.IsNullOrEmpty(plugin.DisplayName)
+                    ? string.IsNullOrEmpty(plugin.Name)
+                        ? "未命名插件"
+                        : plugin.Name
+                    : plugin.DisplayName;
+
+                // 创建插件子菜单项
+                ToolStripMenuItem pluginMenuItem = new ToolStripMenuItem(menuText)
+                {
+                    Size = new System.Drawing.Size(152, 22),
+                    ToolTipText = $"插件目录：{plugin.FolderName}"
+                };
+
+                // 6. 绑定点击事件：执行命令行
+                pluginMenuItem.Click += (sender, e) =>
+                {
+                    try
+                    {
+                        string DownloadPath = Path.Combine(plugin.FolderName, "Downloads");
+                        string downloadPath = Path.Combine(plugin.FolderName, "downloads");
+                        try
+                        {
+                            if (Directory.Exists(downloadPath))
+                            {
+                                // 删除文件
+                                foreach (var file in Directory.GetFiles(downloadPath))
+                                {
+                                    File.Delete(file);
+                                }
+
+                                // 删除子目录
+                                foreach (var dir in Directory.GetDirectories(downloadPath))
+                                {
+                                    Directory.Delete(dir, true);
+                                }
+                            }
+                            if (Directory.Exists(DownloadPath))
+                            {
+                                downloadPath = DownloadPath;
+                                // 删除文件
+                                foreach (var file in Directory.GetFiles(DownloadPath))
+                                {
+                                    File.Delete(file);
+                                }
+
+                                // 删除子目录
+                                foreach (var dir in Directory.GetDirectories(DownloadPath))
+                                {
+                                    Directory.Delete(dir, true);
+                                }
+                            }
+                            if ((!Directory.Exists(downloadPath)) && (!Directory.Exists(downloadPath)))
+                            {
+                                Directory.CreateDirectory(downloadPath);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show($"清理下载目录失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+
+                        // 校验配置：ExePath和CommandLine不能同时为空
+                        if (string.IsNullOrEmpty(plugin.ExePath) && string.IsNullOrEmpty(plugin.CommandLine))
+                        {
+                            MessageBox.Show($"插件「{menuText}」未配置可执行程序或命令行！", "配置错误",
+                                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            return;
+                        }
+                        // 构建进程启动信息（适配两种配置场景）
+                        ProcessStartInfo startInfo = new ProcessStartInfo
+                        {
+                            // EXEPATH配置的情况下会使用exepath启动程序，使用CommandLine作为参数
+                            // 如果EXEPath没有配置，那么就会直接使用CommandLine启动
+                            FileName = !string.IsNullOrEmpty(plugin.ExePath) ? plugin.ExePath : plugin.CommandLine,
+                            Arguments = !string.IsNullOrEmpty(plugin.ExePath) ? (plugin.CommandLine ?? string.Empty) : string.Empty,
+                            WindowStyle = ProcessWindowStyle.Normal, // 正常显示程序窗口
+                            UseShellExecute = true, // 允许启动外部程序（解决部分权限问题）
+                            WorkingDirectory = plugin.FolderName // 工作目录设为插件目录
+                        };
+
+                        // 启动进程执行命令
+                        var process = Process.Start(startInfo);
+                        var thread = new System.Threading.Thread(() =>
+                        {
+                            process.WaitForExit();
+                            // 进程退出后，将下载的文件添加到上传列表
+                            this.Invoke(new Action(() =>
+                            {
+                                if (!Directory.Exists(downloadPath)) return;
+
+                                var newFiles = Directory.GetFiles(downloadPath)
+                                                       .Where(f => !_uploadFiles.Contains(f))
+                                                       .ToList();
+
+                                if (newFiles.Count > 0)
+                                {
+                                    this.Invoke(new Action(() =>
+                                    {
+                                        foreach (var file in newFiles)
+                                        {
+                                            _uploadFiles.Add(file);
+                                        }
+                                        UpdateFileList();
+                                        MessageBox.Show($"成功添加 {newFiles.Count} 个文件到上传列表", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                    }));
+                                }
+                                else
+                                {
+                                    this.Invoke(new Action(() =>
+                                    {
+                                        MessageBox.Show("没有找到新下载的文件", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                    }));
+                                }
+                            }));
+                        });
+                        thread.IsBackground = true;
+                        thread.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        // 异常提示：明确插件名称和错误原因
+                        MessageBox.Show($"启动插件「{menuText}」失败：\n{ex.Message}\n请检查插件路径和命令行配置！",
+                            "执行错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                };
+
+                // 7. 将子菜单项添加到「插件」顶级菜单
+                pluginTopMenu.DropDownItems.Add(pluginMenuItem);
+            }
+        }
+        //按钮处理
         private void btnAddFile_Click(object sender, EventArgs e)
         {
             using (var openFileDialog = new OpenFileDialog())
@@ -64,7 +310,6 @@ namespace AdbFileUploader
                 }
             }
         }
-
         private void btnAddDirectory_Click(object sender, EventArgs e)
         {
             using (var folderDialog = new FolderBrowserDialog())
@@ -79,7 +324,6 @@ namespace AdbFileUploader
                 }
             }
         }
-
         private void btnRemoveFile_Click(object sender, EventArgs e)
         {
             if (lstUploadFiles.SelectedItems.Count > 0)
@@ -90,92 +334,6 @@ namespace AdbFileUploader
                     _uploadFiles.Remove(item);
                 }
                 UpdateFileList();
-            }
-        }
-
-        private void UpdateFileList()
-        {
-            lstUploadFiles.Items.Clear();
-            lstUploadFiles.Items.AddRange(_uploadFiles.ToArray());
-            lblFileCount.Text = $"已选择 {_uploadFiles.Count} 项";
-            btnUpload.Enabled = lstDevices.Items.Count > 0 && _uploadFiles.Count > 0;
-        }
-        private void InitializeAdbPath()
-        {
-            _adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
-
-            if (!File.Exists(_adbPath))
-            {
-                var pathEnv = Environment.GetEnvironmentVariable("PATH");
-                if (pathEnv != null)
-                {
-                    foreach (var path in pathEnv.Split(';'))
-                    {
-                        var testPath = Path.Combine(path, "adb.exe");
-                        if (File.Exists(testPath))
-                        {
-                            _adbPath = testPath;
-                            break;
-                        }
-                    }
-                }
-
-                if (!File.Exists(_adbPath))
-                {
-                    lblStatus.Text = "未找到ADB，请将adb.exe放在程序目录下";
-                    btnUpload.Enabled = false;
-                }
-            }
-        }
-
-        private void CheckForConnectedDevices()
-        {
-            if (!File.Exists(_adbPath)) return;
-
-            try
-            {
-                var process = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = _adbPath,
-                        Arguments = "devices",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    }
-                };
-
-                process.Start();
-                var output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-
-                lstDevices.Items.Clear();
-                var lines = output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var line in lines)
-                {
-                    if (line.Contains("\tdevice") && !line.Contains("List of devices"))
-                    {
-                        lstDevices.Items.Add(line.Split('\t')[0]);
-                    }
-                }
-
-                if (lstDevices.Items.Count > 0)
-                {
-                    lstDevices.SelectedIndex = 0;
-                    lblStatus.Text = $"找到 {lstDevices.Items.Count} 个设备";
-                    btnUpload.Enabled = _uploadFiles.Count > 0; // 仅当有文件且有设备时启用上传
-                }
-                else
-                {
-                    lblStatus.Text = "未找到连接的设备，请确保设备已启用调试模式";
-                    btnUpload.Enabled = false;
-                }
-            }
-            catch (Exception ex)
-            {
-                lblStatus.Text = $"检查设备时出错: {ex.Message}";
             }
         }
         private void btnSelectFile_Click(object sender, EventArgs e)
@@ -199,12 +357,10 @@ namespace AdbFileUploader
                 }
             }
         }
-
         private void btnRefreshDevices_Click(object sender, EventArgs e)
         {
             CheckForConnectedDevices();
         }
-
         private void btnUpload_Click(object sender, EventArgs e)
         {
             if (_uploadFiles.Count == 0)
@@ -341,7 +497,93 @@ namespace AdbFileUploader
 
             uploadThread.Start();
         }
-        // 设计器生成的代码（含UI美化和新增控件）
+        //工具函数
+        private void UpdateFileList()
+        {
+            lstUploadFiles.Items.Clear();
+            lstUploadFiles.Items.AddRange(_uploadFiles.ToArray());
+            lblFileCount.Text = $"已选择 {_uploadFiles.Count} 项";
+            btnUpload.Enabled = lstDevices.Items.Count > 0 && _uploadFiles.Count > 0;
+        }
+        private void InitializeAdbPath()
+        {
+            _adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+
+            if (!File.Exists(_adbPath))
+            {
+                var pathEnv = Environment.GetEnvironmentVariable("PATH");
+                if (pathEnv != null)
+                {
+                    foreach (var path in pathEnv.Split(';'))
+                    {
+                        var testPath = Path.Combine(path, "adb.exe");
+                        if (File.Exists(testPath))
+                        {
+                            _adbPath = testPath;
+                            break;
+                        }
+                    }
+                }
+
+                if (!File.Exists(_adbPath))
+                {
+                    lblStatus.Text = "未找到ADB，请将adb.exe放在程序目录下";
+                    btnUpload.Enabled = false;
+                }
+            }
+        }
+        private void CheckForConnectedDevices()
+        {
+            if (!File.Exists(_adbPath)) return;
+
+            try
+            {
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = _adbPath,
+                        Arguments = "devices",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                lstDevices.Items.Clear();
+                var lines = output.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var line in lines)
+                {
+                    if (line.Contains("\tdevice") && !line.Contains("List of devices"))
+                    {
+                        lstDevices.Items.Add(line.Split('\t')[0]);
+                    }
+                }
+
+                if (lstDevices.Items.Count > 0)
+                {
+                    lstDevices.SelectedIndex = 0;
+                    lblStatus.Text = $"找到 {lstDevices.Items.Count} 个设备";
+                    btnUpload.Enabled = _uploadFiles.Count > 0; // 仅当有文件且有设备时启用上传
+                }
+                else
+                {
+                    lblStatus.Text = "未找到连接的设备，请确保设备已启用调试模式";
+                    btnUpload.Enabled = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                lblStatus.Text = $"检查设备时出错: {ex.Message}";
+            }
+        }
+        
+
         private System.ComponentModel.IContainer components = null;
 
         protected override void Dispose(bool disposing)
@@ -357,8 +599,7 @@ namespace AdbFileUploader
             // 触发上传按钮的点击事件
             btnUpload_Click(sender, e);
         }
-
-
+        //常驻菜单
         private void neteaseMusicToolStripMenuItem_Click(object sender, EventArgs e)
         {
             using (var downloaderForm = new NeteaseMusicDownloaderForm())
@@ -694,6 +935,7 @@ namespace AdbFileUploader
         [STAThread]
         static void Main()
         {
+            
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             // 设置应用程序处理异常的方式
